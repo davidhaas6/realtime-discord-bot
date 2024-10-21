@@ -9,6 +9,8 @@ import io
 from openai_realtime_client import RealtimeClient, InputHandler, AudioHandler
 import logging
 
+from discord_audio_handler import DiscordAudioHandler
+
 # Update the logger configuration
 logger = logging.getLogger()
 logger.setLevel(logging.DEBUG)
@@ -27,6 +29,8 @@ logger.addHandler(console_handler)
 bot = discord.Bot()
 connections = {}
 realtime_clients = {}
+response_data = []
+audio_handler = DiscordAudioHandler()
 
 @bot.command()
 async def record(ctx):
@@ -47,8 +51,7 @@ async def record(ctx):
 		discord.sinks.WaveSink(),
 		record_callback,
 		ctx.channel,
-		vc,  # Pass the voice client to the callback
-		None
+		vc,
 	)
 	await ctx.respond("Started recording!")
 	
@@ -101,33 +104,25 @@ def to_realtime_format(pcm_data, sampwidth, n_channels, framerate):
 	return pcm_data, sampwidth, n_channels, framerate
 
 
-async def init_realtime_client(vc, guild_id):
-	async def wrapped_audio_cbk(audio):
-		await audio_callback(audio, vc, guild_id)
+def init_realtime_client(vc, guild_id):
+	def wrapped_audio_cbk(audio):
+		audio_callback(audio, vc)
+	
 	client = RealtimeClient(
 		api_key=dotenv.get_key('.env','OPENAI_API_KEY'),
 		on_text_delta=lambda text: print(f"\nAssistant: {text}", end="", flush=True),
 		on_audio_delta=wrapped_audio_cbk,
-		tools=[],
-		logger=logger,
 	)
+	realtime_clients.update({guild_id: client})
 	return client
 
 
-async def audio_callback(audio, vc, guild_id):
-	print(len(audio))
-	logger.info(f"Received audio from AI for {guild_id}")
-	# audio_handler.play_audio(audio) 
-	openai_samplerate = 24000
-	openai_sampwidth = 2
-	openai_n_channels = 1
-	await play_audio(vc, audio, openai_samplerate, openai_sampwidth, openai_n_channels)
-	await vc.disconnect()
-	await realtime_clients[guild_id].close()
-	del realtime_clients[guild_id]
+def audio_callback(audio: bytes, vc):
+	audio_handler.vc = vc
+	audio_handler.play_audio(audio)
 
 
-async def play_audio(vc: discord.VoiceClient, pcm_data, sampwidth, n_channels, framerate):
+def play_audio(vc: discord.VoiceClient, pcm_data, sampwidth, n_channels, framerate):
 	# plays audio in a discord voice channel. converts input audio to PCM first.
 	pcm_data, sampwidth, n_channels, framerate = to_discord_format(pcm_data, sampwidth, n_channels, framerate)
 	frame_size = int(framerate * 0.02) * n_channels * sampwidth  # discord takes 20ms frames
@@ -145,13 +140,14 @@ async def play_audio(vc: discord.VoiceClient, pcm_data, sampwidth, n_channels, f
 
 		work_time = time.time() - start_time
 		sleep_time = max(0, 0.02 - work_time)
-		await asyncio.sleep(sleep_time)  # Wait for 20ms
+		# await asyncio.sleep(sleep_time)  # Wait for 20ms
 
 
-async def record_callback(sink: discord.sinks, channel: discord.TextChannel, vc: discord.VoiceClient, chat_client: RealtimeClient, *args): 
+async def record_callback(sink: discord.sinks, channel: discord.TextChannel, vc: discord.VoiceClient, *args): 
 	logger.info(f"Received audio from users")
-	chat_client = await init_realtime_client(vc, 123)
+	chat_client = init_realtime_client(vc, 123)
 	await chat_client.connect()
+	asyncio.create_task(chat_client.handle_messages())
 	# import pdb; pdb.set_trace()
 	logger.info(f"Connected to OpenAI RealTime API!")
 
@@ -159,22 +155,17 @@ async def record_callback(sink: discord.sinks, channel: discord.TextChannel, vc:
 	for user_id, audio in sink.audio_data.items():
 		files.append(discord.File(audio.file, f"{user_id}.{sink.encoding}"))
 		sink.format_audio(audio)
-
 		_, audio_data = update_header(audio.file)
-		# realtime_pcm_data, _, _, _ = to_realtime_format(pcm_data, sampwidth, n_channels, framerate)
-		# write audio data to file
-		with open('audio_bytes.pkl', 'wb') as f:
-			pickle.dump(audio_data, f)
 		await chat_client.send_audio(audio_data)
 		logger.info("Sent audio to OpenAI RealTime API")
 		
-	
 	await channel.send(f"finished recording audio", files=files)  # Send a message with the accumulated files.
 
-	try:
-		await asyncio.wait_for(asyncio.sleep(10), timeout=30.0)  # Simulating waiting for a response
-	except asyncio.TimeoutError:
-		logger.error("No response received from OpenAI RealTime API within the timeout period")
+	await asyncio.wait_for(asyncio.sleep(10), timeout=30.0)  # Simulating waiting for a response
+
+	if len(response_data) > 0:
+		response = b''.join(response_data)
+		AudioHandler().play_audio(response)
 	
 	await sink.vc.disconnect()  # Disconnect from the voice channel.
 	logger.info("Closing connection to OpenAI RealTime API")
