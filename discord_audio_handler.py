@@ -1,4 +1,5 @@
 import asyncio
+import audioop
 import time
 import pyaudio
 import wave
@@ -55,7 +56,7 @@ class DiscordAudioHandler:
 
         # Playback params
         self.playback_stream = None
-        self.playback_buffer = queue.Queue(maxsize=20)
+        self.playback_buffer = queue.Queue(maxsize=50)
         self.playback_event = threading.Event()
         self.playback_thread = None
         self.stop_playback = False
@@ -214,21 +215,30 @@ class DiscordAudioHandler:
             
             frame_size = int(framerate * 0.02) * n_channels * sampwidth  # discord takes 20ms frames
             audio_len_s = len(audio_data)/frame_size * 0.02
-            print(f"Playing audio of length: {audio_len_s} seconds")
+            # print(f'{time.perf_counter()}, {audio_len_s}')
+            # print(f"Playing audio of length: {audio_len_s} seconds")
 
+            # TODO: The audio is super choppy. I think it has to do with the incongruity between
+            # the 20ms frame size for discord and the variable length frame size from the LLM API
+            # Currently, I'm padding the last frame, but this (i believe ) leads to the choppy audio.
+
+            # After some testing, it does seem like the audio is choppy b/c we're not properly spacing out 
+            # the playback for the audio recieved from the AI. e.g. we'll write 25ms chunks every 4 ms
+            print(f"Sending {len(audio_data)/frame_size} frames")
             for i in range(0, len(audio_data), frame_size):
                 if self.playback_event.is_set():
                     break
-                start_time = time.time()
+                start_time = time.perf_counter()
                 frame = audio_data[i:i+frame_size]
                 # Pad the last frame if necessary
                 if len(frame) < frame_size:
                     frame += b'\x00' * (frame_size - len(frame))
                 self.vc.send_audio_packet(frame, encode=True)
-
-                work_time = time.time() - start_time
-                sleep_time = max(0, 0.02 - work_time)
-                # time.sleep(sleep_time)
+                # don't sleep for the last frame
+                if i != len(audio_data) - frame_size:
+                    work_time = time.perf_counter() - start_time
+                    sleep_time = max(0, 0.020 - work_time)
+                    time.sleep(0.005)
         except Exception as e:
             print(f"Error playing audio chunk: {e}")
     
@@ -257,3 +267,39 @@ class DiscordAudioHandler:
             self.stream.close()
 
         self.audio.terminate()
+
+
+def to_discord_format(pcm_data, sampwidth, n_channels, framerate):
+	# convert to 16bit stereo 48khz
+	if sampwidth != 2 or n_channels != 2 or framerate != 48000:
+		print("Converting audio to 16-bit stereo 48kHz")
+		pcm_data = audioop.ratecv(pcm_data, sampwidth, n_channels, framerate, 48000, None)[0]
+		pcm_data = audioop.lin2lin(pcm_data, sampwidth, 2)
+		if n_channels == 1:
+			pcm_data = audioop.tostereo(pcm_data, 2, 1, 1)
+		sampwidth = 2
+		n_channels = 2
+		framerate = 48000
+	return pcm_data, sampwidth, n_channels, framerate
+
+
+async def play_audio(vc, pcm_data, sampwidth, n_channels, framerate):
+	# plays audio in a discord voice channel. converts input audio to PCM first.
+	pcm_data, sampwidth, n_channels, framerate = to_discord_format(pcm_data, sampwidth, n_channels, framerate)
+	frame_size = int(framerate * 0.02) * n_channels * sampwidth  # discord takes 20ms frames
+	
+	audio_len_s = len(pcm_data)/frame_size * 0.02
+	# logger.info(f"Playing audio of length: {audio_len_s} seconds")
+
+	for i in range(0, len(pcm_data), frame_size):
+		start_time = time.time()
+		frame = pcm_data[i:i+frame_size]
+		# Pad the last frame if necessary
+		if len(frame) < frame_size:
+			frame += b'\x00' * (frame_size - len(frame))
+		vc.send_audio_packet(frame, encode=True)
+
+		work_time = time.time() - start_time
+		sleep_time = max(0, 0.02 - work_time)
+		await asyncio.sleep(sleep_time)  # Wait for 20ms
+
