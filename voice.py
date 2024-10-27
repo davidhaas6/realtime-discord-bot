@@ -48,7 +48,7 @@ async def join(ctx: discord.ApplicationContext):
 
 	server_context = ServerContext(vc, ai_client, msg_handler, input_audio_sink)
 	connection_data.update({guild_id: server_context})
-	await ctx.respond("Started recording!")
+	# await ctx.respond("Started recording!")
 
 	# start a timer to read from the sink every 0.25 seconds
 	# asyncio.create_task(read_from_sink(server_context), name="read_from_sink")
@@ -125,7 +125,7 @@ async def start_realtime(vc: discord.VoiceClient):
 		on_text_delta=lambda text: print(f"\nAssistant: {text}", end="", flush=True),
 		on_audio_delta=wrapped_audio_cbk,
 		on_done=done_callback,
-		instructions="You are a concise AI assistant. Respond to the user's question in less than 5 words."
+		instructions="You are a concise AI assistant. Respond to the user's question in less than 5 words. Your answer should be highly expressive and dramatic."
 		# instructions="You are a helpful AI assistant with an operatic flair. You ♪ SING LOOOOUDLY ♪  whenever you talk or perform a task as you always wish you were performing in the OPERAAAAAAAA…. ♪♪ "
 	)
 	await client.connect()
@@ -175,22 +175,19 @@ async def stop_record_callback(sink: discord.sinks, channel: discord.TextChannel
 		await chat_client.send_audio(audio_data)
 
 
-
-async def read_from_sink(server_context: ServerContext):
-	audio_sink: discord.sinks.Sink = server_context.input_audio_sink
-	vc = server_context.vc
-	while True:
-		await asyncio.sleep(0.5)
-		# for user_id, audio in list(audio_sink.audio_data.items()):
-		# 	data = deepcopy(audio.file)
-		# 	with wave.open(data, "wb") as f:
-		# 		f.setnchannels(vc.decoder.CHANNELS)
-		# 		f.setsampwidth(vc.decoder.SAMPLE_SIZE // vc.decoder.CHANNELS)
-		# 		f.setframerate(vc.decoder.SAMPLING_RATE)
-		# 	# _, audio_data = update_header(audio.file)
-		# 	print(f"User {user_id} audio data length: {len(data.read())}")
-
-
+# async def read_from_sink(server_context: ServerContext):
+# 	audio_sink: discord.sinks.Sink = server_context.input_audio_sink
+# 	vc = server_context.vc
+# 	while True:
+# 		await asyncio.sleep(0.5)
+# 		for user_id, audio in list(audio_sink.audio_data.items()):
+# 			data = deepcopy(audio.file)
+# 			with wave.open(data, "wb") as f:
+# 				f.setnchannels(vc.decoder.CHANNELS)
+# 				f.setsampwidth(vc.decoder.SAMPLE_SIZE // vc.decoder.CHANNELS)
+# 				f.setframerate(vc.decoder.SAMPLING_RATE)
+# 			# _, audio_data = update_header(audio.file)
+# 			print(f"User {user_id} audio data length: {len(data.read())}")
 
 
 bot.run(dotenv.get_key('.env','BOT_TOKEN'))
