@@ -2,18 +2,20 @@ import asyncio
 import audioop
 from copy import deepcopy
 from dataclasses import dataclass
+import pickle
+import wave
 import discord
 import dotenv
 import io
 import numpy as np
-from openai_realtime_client import RealtimeClient
+from openai_realtime_client import RealtimeClient, TurnDetectionMode
 from discord_audio_handler import DiscordAudioHandler
-
+import time
 
 bot = discord.Bot()
 connection_data = {}
 audio_handler = DiscordAudioHandler()
-
+start_time = time.time()
 
 @dataclass
 class ServerContext:
@@ -21,6 +23,7 @@ class ServerContext:
 	ai_client: RealtimeClient
 	msg_handler: asyncio.Task
 	input_audio_sink: discord.sinks.Sink
+	audio_task: asyncio.Task = None  # Store task for continuous audio processing
 
 
 @bot.command()
@@ -33,87 +36,98 @@ async def join(ctx: discord.ApplicationContext):
 	
 	vc = await voice.channel.connect()
 
-	ai_client, msg_handler = await start_realtime(vc)
+	ai_client, msg_handler = await start_realtime(vc)	
 
 	input_audio_sink = discord.sinks.WaveSink()
 	vc.start_recording(
 		input_audio_sink,
 		stop_record_callback,
 		ctx.channel,
-		vc,
-		ai_client,
-		guild_id,
 		sync_start=True,
 	)
-
-	server_context = ServerContext(vc, ai_client, msg_handler, input_audio_sink)
+	
+	audio_task = asyncio.create_task(continuous_audio_processing(vc, ai_client, input_audio_sink), name="continuous_audio_processing")
+	
+	server_context = ServerContext(vc, ai_client, msg_handler, input_audio_sink, audio_task)
 	connection_data.update({guild_id: server_context})
-	# await ctx.respond("Started recording!")
-
-	# start a timer to read from the sink every 0.25 seconds
-	# asyncio.create_task(read_from_sink(server_context), name="read_from_sink")
-
-
-def start_recording(ctx: discord.ApplicationContext):
-	guild_id = ctx.guild.id
-	if guild_id not in connection_data:
-		return
-	server_context = connection_data[guild_id]
-	server_context.input_audio_sink = discord.sinks.WaveSink() 
-	server_context.vc.start_recording(
-		server_context.input_audio_sink,
-		stop_record_callback,
-		ctx.channel,
-		server_context.vc,
-		server_context.ai_client,
-		guild_id,
-		sync_start=True,
-	)
+	print(f'Joined voice channel {voice.channel} - guild {guild_id}')
 
 
 @bot.command()
 async def leave(ctx: discord.ApplicationContext):
-	connection = connection_data.get(ctx.guild.id, None)
-	if connection: 
-		if connection.vc.recording:
-			connection.vc.stop_recording()
-		await connection.vc.disconnect()
-		await connection.ai_client.close()
-		
-		# cancel all tasks
-		connection.msg_handler.cancel()
-		# cancel the read_from_sink task
-		tasks = asyncio.all_tasks()
-		for task in tasks:
-			if task.get_name() == "read_from_sink":
-				task.cancel()
-
-		del connection_data[ctx.guild.id]
-		await ctx.delete() 
-	else:
-		await ctx.respond("I am currently not recording here.")  
-
-
-@bot.command()
-async def send(ctx: discord.ApplicationContext):
+	print(f'Leaving voice channel {ctx.channel} - guild {ctx.guild.id}')
 	guild_id = ctx.guild.id
 	connection = connection_data.get(guild_id, None)
-	if not connection:
-		await ctx.respond("I am currently not recording here.")
-		return
 	
-	if connection.vc.recording:
-		connection.vc.stop_recording()
-
-
-@bot.command()
-async def listen(ctx: discord.ApplicationContext):
-	guild_id = ctx.guild.id
-	if guild_id not in connection_data:
+	if connection:
+		if connection.vc.recording:
+			connection.vc.stop_recording()
+		await connection.ai_client.close()
+		await connection.vc.disconnect()
+		connection.msg_handler.cancel()
+		if connection.audio_task and not connection.audio_task.done():
+			connection.audio_task.cancel()
+		del connection_data[guild_id]
+		print("Successfully left")
+	else:
+		print(connection_data)
 		await ctx.respond("I am currently not recording here.")
-		return
-	if not connection_data[guild_id].vc.recording:
-		start_recording(ctx)
+
+
+async def continuous_audio_processing(vc: discord.VoiceClient, ai_client: RealtimeClient, audio_sink: discord.sinks.Sink):
+	"""
+	Continuously processes audio data from the sink and sends it to the AI client.
+	"""
+	user_map = {}
+	while not vc.is_connected():
+		await asyncio.sleep(0.2)
+	print('connected!')
+	while vc.is_connected():
+		await asyncio.sleep(1)  # Adjust this interval as needed for responsiveness
+		for user_id, audio in list(audio_sink.audio_data.items()):
+			if True:
+				if user_id not in user_map:
+					user_map[user_id] = await vc.client.fetch_user(user_id)
+				discord_user = user_map[user_id]
+				if 'davinki' not in discord_user.name.lower():
+					continue
+
+				buffer = io.BytesIO()
+				audio.file.seek(0)
+				with wave.open(buffer, "wb") as f:
+					fs = vc.decoder.SAMPLING_RATE
+					sample_width = vc.decoder.SAMPLE_SIZE // vc.decoder.CHANNELS
+					num_channels = vc.decoder.CHANNELS
+					f.setnchannels(num_channels)
+					f.setsampwidth(sample_width)
+					f.setframerate(fs)
+
+					audio_bytes = audio.file.read()
+					frames_needed = int(fs * 0.1)  # 100ms worth of frames
+					bytes_per_frame = num_channels * sample_width
+					min_bytes = frames_needed * bytes_per_frame
+					# print(f'Min frames = {frames_needed}, audio len = {len(audio_bytes)}')
+
+					if len(audio_bytes) < min_bytes:
+						# Pad the audio bytes to reach the minimum length
+						audio_bytes += b'\x00' * (min_bytes - len(audio_bytes))
+						# print(f'New audio length after padding = {len(audio_bytes)}')
+					
+					total_frames = len(audio_bytes) // bytes_per_frame
+					f.setnframes(total_frames)
+						
+					f.writeframes(audio_bytes)
+				buffer.seek(0)
+				try:
+					await ai_client.send_audio(buffer.getvalue())
+				except Exception as e:
+					print(f"Error sending audio: {e}")
+				
+				# Clear buffer after processing to avoid duplication
+				audio.file.seek(0)  # Reset for the next chunk
+				audio.file.truncate(0)
+				audio.file.seek(0)
+	print("Bot disconnected from voice channel; stopping continuous processing.")
 
 
 async def start_realtime(vc: discord.VoiceClient):
@@ -124,9 +138,8 @@ async def start_realtime(vc: discord.VoiceClient):
 		api_key=dotenv.get_key('.env','OPENAI_API_KEY'),
 		on_text_delta=lambda text: print(f"\nAssistant: {text}", end="", flush=True),
 		on_audio_delta=wrapped_audio_cbk,
-		on_done=done_callback,
-		instructions="You are a concise AI assistant. Respond to the user's question in less than 5 words. Your answer should be highly expressive and dramatic."
-		# instructions="You are a helpful AI assistant with an operatic flair. You ♪ SING LOOOOUDLY ♪  whenever you talk or perform a task as you always wish you were performing in the OPERAAAAAAAA…. ♪♪ "
+		turn_detection_mode=TurnDetectionMode.SERVER_VAD,
+		# instructions="You are a concise AI assistant. Respond to the user's question in less than 5 words."
 	)
 	await client.connect()
 	task = asyncio.create_task(client.handle_messages())
@@ -135,14 +148,12 @@ async def start_realtime(vc: discord.VoiceClient):
 
 
 def audio_callback(audio: bytes, vc: discord.VoiceClient):
+	"""
+	Play audio response from AI in the voice channel.
+	"""
 	audio_handler.vc = vc
-	audio_handler.play_audio(audio)
-
-
-def done_callback(event):
-	print("Response done")
-	print(event)
-
+	if vc.is_connected():
+		audio_handler.play_audio(audio)
 
 def update_header(audio_file: io.BytesIO):
 	audio_file.seek(0)
@@ -158,37 +169,7 @@ def update_header(audio_file: io.BytesIO):
 	audio_file.seek(0)
 	return corrected_audio, audio_data
 
-
-async def stop_record_callback(sink: discord.sinks, channel: discord.TextChannel, vc: discord.VoiceClient, chat_client: RealtimeClient, guild_id: int, *args): 
-	files = []
-	for user_id, audio in list(sink.audio_data.items()):
-		discord_user = await vc.client.fetch_user(user_id)
-		if 'davinki' not in discord_user.name.lower():
-			continue
-		
-		print(f"User {discord_user} has sent audio")
-
-		files.append(discord.File(audio.file, f"{user_id}.{sink.encoding}"))
-
-		sink.format_audio(audio)
-		_, audio_data = update_header(audio.file)
-		await chat_client.send_audio(audio_data)
-
-
-# async def read_from_sink(server_context: ServerContext):
-# 	audio_sink: discord.sinks.Sink = server_context.input_audio_sink
-# 	vc = server_context.vc
-# 	while True:
-# 		await asyncio.sleep(0.5)
-# 		for user_id, audio in list(audio_sink.audio_data.items()):
-# 			data = deepcopy(audio.file)
-# 			with wave.open(data, "wb") as f:
-# 				f.setnchannels(vc.decoder.CHANNELS)
-# 				f.setsampwidth(vc.decoder.SAMPLE_SIZE // vc.decoder.CHANNELS)
-# 				f.setframerate(vc.decoder.SAMPLING_RATE)
-# 			# _, audio_data = update_header(audio.file)
-# 			print(f"User {user_id} audio data length: {len(data.read())}")
-
+async def stop_record_callback(sink: discord.sinks, channel: discord.TextChannel): 
+	pass
 
 bot.run(dotenv.get_key('.env','BOT_TOKEN'))
-

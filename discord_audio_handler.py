@@ -224,7 +224,7 @@ class DiscordAudioHandler:
 
             # After some testing, it does seem like the audio is choppy b/c we're not properly spacing out 
             # the playback for the audio recieved from the AI. e.g. we'll write 25ms chunks every 4 ms
-            print(f"Sending {len(audio_data)/frame_size} frames")
+            # print(f"Sending {len(audio_data)/frame_size} frames")
             for i in range(0, len(audio_data), frame_size):
                 if self.playback_event.is_set():
                     break
