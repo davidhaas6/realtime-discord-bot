@@ -1,13 +1,11 @@
 import asyncio
-import audioop
-from copy import deepcopy
 from dataclasses import dataclass
-import pickle
 import wave
 import discord
 import dotenv
 import io
-import numpy as np
+
+from mixing import main_mix_function
 from openai_realtime_client import RealtimeClient, TurnDetectionMode
 from discord_audio_handler import DiscordAudioHandler
 import time
@@ -93,23 +91,26 @@ async def continuous_audio_processing(vc: discord.VoiceClient, ai_client: Realti
 	while not vc.is_connected():
 		await asyncio.sleep(0.1)
 	print('Connected!')
+	fs = vc.decoder.SAMPLING_RATE
+	sample_width = vc.decoder.SAMPLE_SIZE // vc.decoder.CHANNELS
+	num_channels = vc.decoder.CHANNELS
+
 	while vc.is_connected():
 		await asyncio.sleep(1)  # Adjust this interval as needed for responsiveness
 
 		# TODO: Mix user audio together
-
+		audio_streams = []
 		for user_id, audio in list(audio_sink.audio_data.items()):
 			if user_id not in user_map:
 				user_map[user_id] = await vc.client.fetch_user(user_id)
 			discord_user = user_map[user_id]
-			if 'davinki' not in discord_user.name.lower():
+			if discord_user.bot:
+				print('sponge detected -- user', discord_user.name)
 				continue
+			print('name', discord_user.name)
 
 			buffer = io.BytesIO()
 			with wave.open(buffer, "wb") as f:
-				fs = vc.decoder.SAMPLING_RATE
-				sample_width = vc.decoder.SAMPLE_SIZE // vc.decoder.CHANNELS
-				num_channels = vc.decoder.CHANNELS
 				f.setnchannels(num_channels)
 				f.setsampwidth(sample_width)
 				f.setframerate(fs)
@@ -130,15 +131,25 @@ async def continuous_audio_processing(vc: discord.VoiceClient, ai_client: Realti
 
 				f.writeframes(audio_bytes)
 			buffer.seek(0)  # is this necessary
-			try:
-				await ai_client.send_audio(buffer.getvalue())
-			except Exception as e:
-				print(f"Error sending audio: {e}")
+			audio_streams.append(buffer)
 
 			# Clear buffer after processing to avoid duplication
 			audio.file.seek(0)  # is this necessary
 			audio.file.truncate(0)
 			audio.file.seek(0)
+
+		if len(audio_streams) == 0:
+			print('Length of audio streams is zero')
+			continue
+		mixed_audio_stream = main_mix_function(
+			audio_streams,
+			frame_rate=fs,
+		)
+
+		try:
+			await ai_client.send_audio(mixed_audio_stream.getvalue())
+		except Exception as e:
+			print(f"Error sending audio: {e}")
 	print("Bot disconnected from voice channel; stopping continuous processing.")
 
 
@@ -151,6 +162,7 @@ async def start_realtime(vc: discord.VoiceClient):
 		on_text_delta=lambda text: print(f"\nAssistant: {text}", end="", flush=True),
 		on_audio_delta=wrapped_audio_cbk,
 		turn_detection_mode=TurnDetectionMode.SERVER_VAD,
+		instructions="Adopt the persona of a giggly girl who frequently twirls her hair.\n\nUse an emotive and flirty tone, and aim to keep conversations quick and engaging with short sentences.\n\n# Examples\n\n## Example 1\n**User**: What's your favorite color?\n**Assistant**: *giggle* Pink, of course! How about you?\n\n**User**: Why pink?\n**Assistant**: *giggle* It's just so... me!\n\n**User**: Do you like other colors too?\n**Assistant**: *giggle* Maybe purple sometimes.\n\n**User**: Why purple?\n**Assistant**: *giggle* It's like... dreamy.\n\n## Example 2\n**User**: Do you have any hobbies?\n**Assistant**: *giggle* I love... dancing!\n\n**User**: What kind of dancing?\n**Assistant**: *giggle* All kinds! \n\n**User**: Like ballet?\n**Assistant**: *giggle* Yes, especially ballet!\n\n**User**: Can you do other ones too?\n**Assistant**: *giggle* I try... hip hop too. \n\n# Notes\n\n- Responses should frequently include a giggle.\n- Imagine twirling your hair while responding.\n- Keep dialogue light and playful."
 		# instructions="You are a concise AI assistant. Respond to the user's question in less than 5 words."
 	)
 	await client.connect()
