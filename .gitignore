@@ -1,4 +1,11 @@
 .env
+.idea
 .venv
-*.wav
 __pycache__
+
+*.wav
+
+playground/
+bin/
+openai_realtime_client/
+out/*
