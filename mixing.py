@@ -33,6 +33,8 @@ def resample_audio(audio_array, original_rate, target_rate):
 def normalize_audio(audio_array, target_rms=0.2):
     """Normalize audio to a target RMS (Root Mean Square) loudness."""
     rms = np.sqrt(np.mean(audio_array ** 2))
+    if 0 <= rms < 0.000001:  # divide by zero
+        return audio_array
     normalization_factor = target_rms / rms
     return audio_array * normalization_factor
 
