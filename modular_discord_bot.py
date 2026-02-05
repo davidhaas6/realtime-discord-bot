@@ -116,22 +116,23 @@ class ModularDiscordBot(discord.Bot):
 
                     context.user_audio_buffer.write(data)
                     context.last_voice_time = time.time()
+                    print("still speaking")
 
-                elif context.is_speaking:
-                    # Check if silence duration has passed
-                    if time.time() - context.last_voice_time > SILENCE_DURATION:
-                        print("User finished speaking. Triggering pipeline...")
-                        context.is_speaking = False
+            if context.is_speaking:
+                # Check if silence duration has passed
+                if time.time() - context.last_voice_time > SILENCE_DURATION:
+                    print("User finished speaking. Triggering pipeline...")
+                    context.is_speaking = False
 
-                        # Prepare WAV for STT
-                        audio_data = context.user_audio_buffer.getvalue()
-                        wav_data = pcm_to_wav(
-                            audio_data, CHANNELS, SAMPLE_WIDTH, SAMPLING_RATE
-                        )
+                    # Prepare WAV for STT
+                    audio_data = context.user_audio_buffer.getvalue()
+                    wav_data = pcm_to_wav(
+                        audio_data, CHANNELS, SAMPLE_WIDTH, SAMPLING_RATE
+                    )
 
-                        # Run pipeline in background
-                        asyncio.create_task(self.run_pipeline(context, wav_data))
-                        context.user_audio_buffer = None
+                    # Run pipeline in background
+                    asyncio.create_task(self.run_pipeline(context, wav_data))
+                    context.user_audio_buffer = None
 
     # --- SMOOTH PLAYBACK (JITTER BUFFER) ---
 
