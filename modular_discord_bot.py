@@ -1,5 +1,6 @@
 import asyncio
 import io
+import os
 import queue
 import threading
 import time
@@ -7,9 +8,19 @@ from dataclasses import dataclass
 
 import discord
 import dotenv
+from dotenv import load_dotenv
+from mistralai import Mistral
 from pydub import AudioSegment
 
 from audio_utils import calculate_rms, pcm_to_wav
+
+load_dotenv()
+
+api_key = os.environ["MISTRAL_API_KEY"]
+model = "voxtral-mini-latest"
+
+client = Mistral(api_key=api_key)
+
 
 # Configuration
 VAD_THRESHOLD = (
@@ -44,10 +55,20 @@ class ModularDiscordBot(discord.Bot):
     # --- PLACEHOLDERS: Implement your custom models here ---
 
     async def transcribe_audio(self, audio_data: bytes) -> str:
-        """Placeholder for Speech-to-Text (STT)"""
+        """Transcribe audio using Mistral API"""
         print("[STT] Transcribing audio...")
-        # Example: return await openai_client.audio.transcriptions.create(...)
-        return "This is a placeholder transcript."
+        try:
+            transcription_response = await client.audio.transcriptions.complete_async(
+                model=model,
+                file={
+                    "file_name": "audio.wav",
+                    "content": audio_data,
+                },
+            )
+            return transcription_response.text
+        except Exception as e:
+            print(f"Transcription error: {e}")
+            return ""
 
     async def decide_to_respond(self, transcript: str) -> bool:
         """Placeholder for deciding if the bot should speak"""
